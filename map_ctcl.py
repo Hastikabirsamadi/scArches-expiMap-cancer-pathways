@@ -9,7 +9,8 @@ Map the CTCL subsample onto the healthy PBMC expiMap reference by architecture s
 3. Surgery: each CTCL study (--batch_key) becomes a new batch. Only the new batch weights are trained.
 4. Checks: kNN label transfer of the reference cell types, a cross-table against the authors' labels,
    and batch mixing between the reference and the healthy CTCL donors.
-Outputs in --out: metrics.json, crosstab_*.csv, missing_genes.txt, UMAP figures, query_model/, and
+Outputs in --out: metrics.json, crosstab_*.csv, missing_genes.txt, UMAP figures (fig1-fig5, drawn by
+plot_ctcl.py), query_model/, and
 ctcl_mapped.h5ad (cell labels, latent, pathway scores; no expression matrix).
 """
 import argparse
@@ -35,6 +36,7 @@ from sklearn.neighbors import KNeighborsClassifier  # noqa: E402
 
 import scarches as sca  # noqa: E402
 from metrics import ilisi  # noqa: E402
+from plot_ctcl import make_figures  # noqa: E402
 from run_experiment import ALPHA, EARLY_STOP, prepare  # noqa: E402
 
 
@@ -211,12 +213,8 @@ def main():
     for c in joint.obs.columns:
         if joint.obs[c].dtype == object:
             joint.obs[c] = joint.obs[c].astype(str)
-    sc.settings.figdir = args.out
-    sc.pl.umap(joint, color=["source", "study", "cell_type"], frameon=False, wspace=0.6, show=False,
-               save="_joint.png")
+    make_figures(joint, args.out, args.disease_key, args.label_key, args.normal_value)
     ctcl = joint[joint.obs["source"] == "CTCL"].copy()
-    sc.pl.umap(ctcl, color=[args.disease_key, args.label_key, "pred_confidence"], frameon=False, wspace=0.6,
-               show=False, save="_ctcl.png")
     qa_out = ad.AnnData(obs=qa.obs.copy())
     qa_out.obsm["X_pathways"] = q_scores.astype(np.float32)
     qa_out.obsm["X_umap"] = ctcl.obsm["X_umap"]
