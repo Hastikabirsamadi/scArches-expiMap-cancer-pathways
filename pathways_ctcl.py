@@ -1,0 +1,259 @@
+"""
+Part A for CTCL: which pathways change in the cancer cells, and which genes drive them.
+
+    python pathways_ctcl.py --map DRIVE/ctcl_map/seed0
+
+Reads ctcl_mapped.h5ad (pathway scores per cell) and query_model/ (decoder weights) from --map.
+Writes everything to --map/partA.
+
+Healthy donors and patients come from different studies (study and disease are confounded), so only
+comparisons inside the same patients or the same studies are made:
+1. malignant vs non-malignant CD4+ T cells of the same patient (paired, one value per patient)
+2. MF vs Sezary malignant cells, only in studies that hold both, after removing each study's average
+Each patient counts once in the tests (not each cell), because cells of one patient are not independent.
+Scores are z-scored per pathway over all CTCL cells, so differences are in standard deviations.
+"""
+import argparse
+import json
+import os
+
+import anndata as ad
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import torch  # noqa: E402
+from scipy.stats import mannwhitneyu, wilcoxon  # noqa: E402
+
+DISEASE_COLORS = {"Sezary syndrome": "#e8744c", "mycosis fungoides": "#9b59b6", "normal": "#4c9be8"}
+ABBR = {"Sezary syndrome": "SS", "mycosis fungoides": "MF"}
+
+
+def bh(p):
+    """Benjamini-Hochberg FDR: corrects p-values for testing many pathways at once."""
+    p = np.asarray(p, float)
+    out = np.full_like(p, np.nan)
+    ok = ~np.isnan(p)
+    q = p[ok]
+    order = np.argsort(q)
+    ranked = q[order] * len(q) / (np.arange(len(q)) + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    res = np.empty_like(q)
+    res[order] = np.minimum(ranked, 1)
+    out[ok] = res
+    return out
+
+
+def short(name, n=45):
+    name = str(name).replace("REACTOME_", "")
+    return name if len(name) <= n else name[: n - 1] + "…"
+
+
+def gene_weights(model_dir, n_pathways):
+    """Decoder weights (genes x active pathways), signed so that a positive weight means the gene goes
+    up when the pathway score goes up (same sign rule as expiMap's latent_directions)."""
+    state = torch.load(os.path.join(model_dir, "model_params.pt"), map_location="cpu")
+    W = state["decoder.L0.expr_L.weight"].numpy()  # genes x all terms (out-of-mask weights are zero)
+    active = np.abs(W).sum(0) > 0
+    W = W[:, active]
+    if W.shape[1] != n_pathways:
+        raise SystemExit(f"model has {W.shape[1]} active pathways but the mapped file has {n_pathways}; stop")
+    genes = np.genfromtxt(os.path.join(model_dir, "var_names.csv"), delimiter=",", dtype=str)
+    sign = np.sign(W.sum(0))
+    sign[sign == 0] = 1
+    return W * sign, genes
+
+
+def heatmap(ax, M, rows, cols, title, vmax=None, cmap="RdBu_r", label=""):
+    vmax = vmax or np.nanpercentile(np.abs(M), 98)
+    im = ax.imshow(M, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
+    ax.set_yticks(range(len(rows)), rows, fontsize=7)
+    ax.set_xticks(range(len(cols)), cols, fontsize=7, rotation=90)
+    ax.set_title(title, fontsize=10)
+    cb = plt.colorbar(im, ax=ax, fraction=0.03)
+    cb.set_label(label, fontsize=8)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--map", required=True, help="output folder of map_ctcl.py")
+    ap.add_argument("--donor_key", default="donor_id")
+    ap.add_argument("--study_key", default="accession")
+    ap.add_argument("--label_key", default="author_sub_cell_type")
+    ap.add_argument("--disease_key", default="disease")
+    ap.add_argument("--normal_value", default="normal")
+    ap.add_argument("--cd4_label", default="CD4+ T cells", help="voted reference type used as the control")
+    ap.add_argument("--stage_keys", default="stage1,stage2", help="only printed and saved for now")
+    ap.add_argument("--min_cells", type=int, default=20, help="min cells per group per patient")
+    ap.add_argument("--top", type=int, default=15, help="pathways shown per direction")
+    args = ap.parse_args()
+    out = os.path.join(args.map, "partA")
+    os.makedirs(out, exist_ok=True)
+
+    m = ad.read_h5ad(os.path.join(args.map, "ctcl_mapped.h5ad"))
+    names = np.array(m.uns["pathways"])
+    P = np.asarray(m.obsm["X_pathways"], float)
+    Z = (P - P.mean(0)) / (P.std(0) + 1e-8)  # standard deviations, so pathways are comparable
+    obs = m.obs
+    donor = obs[args.donor_key].astype(str).values
+    study = obs[args.study_key].astype(str).values
+    dis = obs[args.disease_key].astype(str).values
+    mal = obs[args.label_key].astype(str).str.lower().str.contains("malignant").values
+    patient = dis != args.normal_value
+    cd4 = (obs["pred_cell_type"].astype(str).values == args.cd4_label) & ~mal
+    W, genes = gene_weights(os.path.join(args.map, "query_model"), len(names))
+    print(f"{m.n_obs} CTCL cells, {len(names)} pathways, {patient.sum()} cells from patients")
+
+    # donor table (also shows the stage columns, to plan the early vs late comparison)
+    stage_keys = [k for k in args.stage_keys.split(",") if k in obs.columns]
+    d = pd.DataFrame({"donor": donor, "study": study, "disease": dis, "malignant": mal, "cd4_control": cd4})
+    for k in stage_keys:
+        d[k] = obs[k].astype(str).values
+    donors = d.groupby("donor").agg(study=("study", "first"), disease=("disease", "first"),
+                                    n_cells=("donor", "size"), n_malignant=("malignant", "sum"),
+                                    n_cd4_control=("cd4_control", "sum"),
+                                    **{k: (k, "first") for k in stage_keys})
+    donors.to_csv(os.path.join(out, "donors.csv"))
+    print(donors[donors["disease"] != args.normal_value].to_string())
+
+    # 1. malignant vs non-malignant CD4+ T cells, inside each patient
+    rows, used = [], []
+    for p in sorted(set(donor[patient])):
+        a = patient & (donor == p) & mal
+        b = patient & (donor == p) & cd4
+        if a.sum() >= args.min_cells and b.sum() >= args.min_cells:
+            rows.append(Z[a].mean(0) - Z[b].mean(0))
+            used.append(p)
+    res = {"comp1_patients_used": len(used),
+           "comp1_patients_skipped": sorted(set(donor[patient]) - set(used))}
+    print(f"comparison 1: {len(used)} patients have >= {args.min_cells} malignant and control cells")
+    if len(used) < 5:
+        raise SystemExit("fewer than 5 patients usable for comparison 1; lower --min_cells or check the labels")
+    D = np.vstack(rows)  # patients x pathways
+    pvals = np.array([wilcoxon(D[:, j]).pvalue if np.any(D[:, j] != 0) else 1.0 for j in range(D.shape[1])])
+    c1 = pd.DataFrame({"pathway": names, "mean_diff_sd": D.mean(0), "median_diff_sd": np.median(D, 0),
+                       "patients_up": (D > 0).sum(0), "patients": len(used), "p": pvals, "fdr": bh(pvals)})
+    c1 = c1.sort_values(["fdr", "mean_diff_sd"], key=lambda s: s if s.name == "fdr" else -s.abs())
+    c1.to_csv(os.path.join(out, "comp1_malignant_vs_cd4.csv"), index=False)
+    sig = c1[c1["fdr"] < 0.05]
+    res["comp1_significant_fdr05"] = int(len(sig))
+    res["comp1_up_fdr05"] = int((sig["mean_diff_sd"] > 0).sum())
+    res["comp1_down_fdr05"] = int((sig["mean_diff_sd"] < 0).sum())
+    up = sig[sig["mean_diff_sd"] > 0].nlargest(args.top, "mean_diff_sd")
+    down = sig[sig["mean_diff_sd"] < 0].nsmallest(args.top, "mean_diff_sd")
+    show = pd.concat([up, down])
+    print(f"comparison 1: {len(sig)} pathways differ (FDR < 0.05): {len(up)} shown up, {len(down)} shown down")
+
+    if len(show):
+        # heatmap: pathways x patients, patients grouped by disease
+        dz = pd.Series([donors.loc[p, "disease"] for p in used], index=used)
+        order = dz.sort_values().index
+        cols = [used.index(p) for p in order]
+        idx = [list(names).index(n) for n in show["pathway"]]
+        fig, ax = plt.subplots(figsize=(4 + 0.3 * len(used), 2 + 0.25 * len(show)))
+        heatmap(ax, D[np.ix_(cols, idx)].T, [short(n) for n in show["pathway"]], list(order),
+                "Malignant minus non-malignant CD4+ T cells, per patient\n(top: higher in malignant)",
+                label="difference (SD)")
+        for t, p in zip(ax.get_xticklabels(), order):  # patient names coloured by disease
+            t.set_color(DISEASE_COLORS.get(dz[p], "grey"))
+        ax.axhline(len(up) - 0.5, color="black", lw=1)
+        h = [plt.Line2D([], [], marker="s", ls="", color=c, label=f"{k} (name colour)") for k, c in DISEASE_COLORS.items()
+             if k in set(dz)]
+        ax.legend(handles=h, loc="upper left", bbox_to_anchor=(1.15, 1.0), frameon=False, fontsize=8)
+        fig.savefig(os.path.join(out, "fig_A1_malignant_vs_cd4_heatmap.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        # UMAPs of the two strongest pathways in each direction
+        pick = list(up["pathway"][:2]) + list(down["pathway"][:2])
+        xy = m.obsm["X_umap"]
+        fig, axes = plt.subplots(1, len(pick) + 1, figsize=(4.5 * (len(pick) + 1), 4.2))
+        axes[0].scatter(xy[:, 0], xy[:, 1], s=1, c="#dddddd", linewidths=0, rasterized=True)
+        axes[0].scatter(xy[mal, 0], xy[mal, 1], s=1, c="#d62728", linewidths=0, rasterized=True)
+        axes[0].set_title("malignant cells (red)", fontsize=9)
+        for ax, n in zip(axes[1:], pick):
+            v = Z[:, list(names).index(n)]
+            lo, hi = np.percentile(v, [1, 99])
+            o = np.argsort(v)
+            sc_ = ax.scatter(xy[o, 0], xy[o, 1], s=1, c=np.clip(v[o], lo, hi), cmap="viridis", linewidths=0,
+                             rasterized=True)
+            ax.set_title(short(n, 40), fontsize=9)
+            plt.colorbar(sc_, ax=ax, fraction=0.04).set_label("score (SD)", fontsize=7)
+        for ax in axes:
+            ax.set_xticks([]), ax.set_yticks([])
+            for s in ax.spines.values():
+                s.set_visible(False)
+        fig.savefig(os.path.join(out, "fig_A2_pathway_umaps.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        # top genes behind the shown pathways (candidates only: decoder weights, not a test)
+        g = []
+        for n in show["pathway"]:
+            w = W[:, list(names).index(n)]
+            for r, i in enumerate(np.argsort(-np.abs(w))[:10]):
+                if w[i] != 0:
+                    g.append(dict(pathway=n, direction="up in malignant" if n in set(up["pathway"]) else
+                                  "down in malignant", rank=r + 1, gene=genes[i], weight=float(w[i])))
+        pd.DataFrame(g).to_csv(os.path.join(out, "comp1_top_genes.csv"), index=False)
+
+    # 3. pathway profile per cell type (patients only): which pathways mark which cell type
+    ct = np.where(mal, "malignant", obs["pred_cell_type"].astype(str).values)
+    keep_ct = [c for c, n in pd.Series(ct[patient]).value_counts().items() if n >= 200]
+    M = np.vstack([Z[patient & (ct == c)].mean(0) for c in keep_ct])  # cell types x pathways
+    var_idx = np.argsort(-M.var(0))[:30]
+    fig, ax = plt.subplots(figsize=(3 + 0.45 * len(keep_ct), 9))
+    heatmap(ax, M[:, var_idx].T, [short(n) for n in names[var_idx]], keep_ct,
+            "Mean pathway score per cell type (patients only)\n30 pathways that differ most between types",
+            label="mean score (SD)")
+    fig.savefig(os.path.join(out, "fig_A3_celltype_profiles.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 2. MF vs Sezary malignant cells, only in studies that hold both diseases
+    pat = donors[(donors["disease"] != args.normal_value) & (donors["n_malignant"] >= args.min_cells)]
+    both = [s for s, g in pat.groupby("study") if g["disease"].nunique() > 1]
+    pat = pat[pat["study"].isin(both)]
+    res["comp2_studies"] = both
+    res["comp2_donors_per_disease"] = {k: int(v) for k, v in pat["disease"].value_counts().items()}
+    print("comparison 2 uses studies", both, "donors:", res["comp2_donors_per_disease"])
+    if pat["disease"].nunique() == 2 and pat["disease"].value_counts().min() >= 3:
+        means = np.vstack([Z[patient & mal & (donor == p)].mean(0) for p in pat.index])
+        means = means - pd.DataFrame(means).groupby(pat["study"].values).transform("mean").values
+        a_name, b_name = sorted(pat["disease"].unique())
+        a = means[(pat["disease"] == a_name).values]
+        b = means[(pat["disease"] == b_name).values]
+        p2 = np.array([mannwhitneyu(a[:, j], b[:, j]).pvalue for j in range(len(names))])
+        c2 = pd.DataFrame({"pathway": names, f"mean_{a_name}_minus_{b_name}_sd": a.mean(0) - b.mean(0),
+                           "p": p2, "fdr": bh(p2)})
+        c2 = c2.sort_values(["p", c2.columns[1]], key=lambda s: s if s.name == "p" else -s.abs())
+        c2.to_csv(os.path.join(out, "comp2_mf_vs_sezary.csv"), index=False)
+        res["comp2_significant_fdr05"] = int((c2["fdr"] < 0.05).sum())
+        res["comp2_lowest_p"] = float(c2["p"].min())
+        # strip plot of the 6 pathways with the lowest p, one dot per patient
+        top6 = c2["pathway"][:6].tolist()
+        fig, axes = plt.subplots(1, 6, figsize=(16, 3.6), sharey=True)
+        scol = dict(zip(both, plt.get_cmap("tab10").colors))
+        for ax, n in zip(axes, top6):
+            j = list(names).index(n)
+            for k, (nm, grp) in enumerate([(a_name, a), (b_name, b)]):
+                st = pat["study"].values[(pat["disease"] == nm).values]
+                ax.scatter(np.full(len(grp), k) + np.random.RandomState(0).uniform(-0.12, 0.12, len(grp)),
+                           grp[:, j], c=[scol[s] for s in st], s=25)
+            ax.set_xticks([0, 1], [ABBR.get(a_name, a_name), ABBR.get(b_name, b_name)])
+            ax.set_title(short(n, 30), fontsize=8)
+            ax.axhline(0, color="grey", lw=0.5)
+        axes[0].set_ylabel("malignant cells, donor mean\n(study average removed, SD)")
+        h = [plt.Line2D([], [], marker="o", ls="", color=c, label=s) for s, c in scol.items()]
+        fig.legend(handles=h, loc="upper right", frameon=False, fontsize=8)
+        fig.suptitle("MF vs Sezary (SS) malignant cells: 6 lowest p-values (one dot = one patient)", y=1.05)
+        fig.savefig(os.path.join(out, "fig_A4_mf_vs_sezary.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        print("comparison 2 skipped: needs at least 3 patients of each disease in shared studies")
+
+    json.dump(res, open(os.path.join(out, "summary.json"), "w"), indent=2)
+    print(json.dumps(res, indent=1))
+
+
+if __name__ == "__main__":
+    main()
