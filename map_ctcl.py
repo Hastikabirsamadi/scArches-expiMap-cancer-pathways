@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(HERE, "src"))
 warnings.simplefilter("ignore")
 
 import anndata as ad  # noqa: E402
+import numba  # noqa: E402
 import scanpy as sc  # noqa: E402
 import torch  # noqa: E402
 from scipy import sparse  # noqa: E402
@@ -92,12 +93,14 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--epochs", type=int, default=400)
     ap.add_argument("--ref_max_cells", type=int, default=0, help="only for quick tests")
+    ap.add_argument("--retrain", action="store_true", help="train the query model even if one is saved")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     t0 = time.time()
     res = dict(seed=args.seed, device="cuda" if torch.cuda.is_available() else "cpu")
+    print("device for training:", res["device"], flush=True)
 
     # 1. reference
     adata, _ = prepare(args.data, args.ref_max_cells, args.seed)
@@ -128,13 +131,23 @@ def main():
     print(f"genes: {len(genes) - len(missing)} of {len(genes)} reference genes found in CTCL", flush=True)
 
     # 3. surgery: only the new CTCL batch weights are trained
-    qry = sca.models.EXPIMAP.load_query_data(qa, ref)
-    qry.train(n_epochs=args.epochs, alpha_epoch_anneal=100, weight_decay=0.0, alpha_kl=0.1,
-              seed=args.seed, use_early_stopping=True)
-    res["query_epochs"] = len(qry.trainer.logs.get("epoch_loss", []))
-    pd.DataFrame({k: pd.Series(v) for k, v in qry.trainer.logs.items()}).to_csv(
-        os.path.join(args.out, "query_train_log.csv"), index=False)
-    qry.save(os.path.join(args.out, "query_model"), overwrite=True)
+    # if a finished query model is already saved (e.g. the run crashed after training), reuse it
+    qpath = os.path.join(args.out, "query_model")
+    if os.path.exists(os.path.join(qpath, "model_params.pt")) and not args.retrain:
+        print("loading the already trained query model from", qpath, flush=True)
+        qry = sca.models.EXPIMAP.load(qpath, qa)
+        log = pd.read_csv(os.path.join(args.out, "query_train_log.csv"))
+        res["query_epochs"] = int(log["epoch_loss"].notna().sum()) if "epoch_loss" in log else None
+        res["query_model"] = "loaded"
+    else:
+        qry = sca.models.EXPIMAP.load_query_data(qa, ref)
+        qry.train(n_epochs=args.epochs, alpha_epoch_anneal=100, weight_decay=0.0, alpha_kl=0.1,
+                  seed=args.seed, use_early_stopping=True)
+        res["query_epochs"] = len(qry.trainer.logs.get("epoch_loss", []))
+        res["query_model"] = "trained"
+        pd.DataFrame({k: pd.Series(v) for k, v in qry.trainer.logs.items()}).to_csv(
+            os.path.join(args.out, "query_train_log.csv"), index=False)
+        qry.save(qpath, overwrite=True)
 
     # latent space for reference + CTCL cells (posterior mean)
     active = qry.nonzero_terms()
@@ -191,6 +204,8 @@ def main():
     joint.obs_names_make_unique()
     joint.obsm["X_cvae"] = np.vstack([z_ref, z_q]).astype(np.float32)
     joint.uns["active_terms"] = terms[active].tolist()
+    # never ask for more CPU threads than this machine allows (Colab has 2); a too-high value crashed here
+    sc.settings.n_jobs = numba.config.NUMBA_NUM_THREADS
     sc.pp.neighbors(joint, use_rep="X_cvae", random_state=args.seed)
     sc.tl.umap(joint, random_state=args.seed)
     for c in joint.obs.columns:
