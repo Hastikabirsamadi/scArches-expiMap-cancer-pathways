@@ -66,6 +66,71 @@ def gene_weights(model_dir, n_pathways):
     return W * sign, genes
 
 
+def gene_check(counts_path, cells, donor, used, mal, cd4, patient, show, up, W, genes, names, out, n_genes=8):
+    """Do the measured genes agree with the pathway result? For the top genes of each shown pathway,
+    compare their real expression (log-normalised counts) in malignant vs normal CD4+ T cells of the same
+    patient. A gene 'agrees' when it moves in the direction its decoder weight predicts. If most top genes
+    agree, the pathway result is visible in the data itself, not only in the model's latent space."""
+    from scipy import sparse
+    c = ad.read_h5ad(counts_path)
+    if not pd.Index(cells).isin(c.obs_names).all():
+        raise SystemExit("cells in the mapped file are missing from --counts; is it the same subsample?")
+    c = c[pd.Index(cells)]
+    X = sparse.csr_matrix(c.X)
+    lib = np.asarray(X.sum(1)).ravel()
+    lib[lib == 0] = 1
+    X = X.tocsc()  # fast column (gene) access
+    gidx = pd.Index(c.var_names)
+    up_set = set(up["pathway"])
+    rows = []
+    for n in show["pathway"]:
+        sign_path = 1 if n in up_set else -1
+        w = W[:, list(names).index(n)]
+        for r, i in enumerate(np.argsort(-np.abs(w))[:n_genes]):
+            if w[i] == 0 or genes[i] not in gidx:
+                continue
+            x = np.log1p(np.asarray(X[:, gidx.get_loc(genes[i])].todense()).ravel() / lib * 1e4)
+            diffs = np.array([x[patient & (donor == p) & mal].mean() - x[patient & (donor == p) & cd4].mean()
+                              for p in used])
+            expect = np.sign(w[i]) * sign_path
+            rows.append(dict(pathway=n, direction="up in malignant" if sign_path > 0 else "down in malignant",
+                             rank=r + 1, gene=genes[i], weight=float(w[i]), expected="up" if expect > 0 else "down",
+                             mean_logexpr_diff=float(diffs.mean()),
+                             patients_agree=int((np.sign(diffs) == expect).sum()), patients=len(used),
+                             agrees=bool(np.sign(diffs.mean()) == expect)))
+    g = pd.DataFrame(rows)
+    g.to_csv(os.path.join(out, "comp1_gene_check.csv"), index=False)
+    summ = g.groupby("pathway", sort=False).agg(direction=("direction", "first"), genes=("gene", "size"),
+                                                 genes_agree=("agrees", "sum"))
+    summ.to_csv(os.path.join(out, "comp1_gene_check_summary.csv"))
+    print("gene check (top genes per pathway that move as predicted):")
+    print(summ.to_string())
+
+    # figure: 6 pathways per direction, one bar per gene
+    pick = [p for p in summ.index if summ.loc[p, "direction"].startswith("up")][:6] + \
+           [p for p in summ.index if summ.loc[p, "direction"].startswith("down")][:6]
+    if pick:
+        ncol = 6
+        nrow = int(np.ceil(len(pick) / ncol))
+        fig, axes = plt.subplots(nrow, ncol, figsize=(3.2 * ncol, 3.2 * nrow), squeeze=False)
+        for ax, n in zip(axes.ravel(), pick):
+            s = g[g["pathway"] == n][::-1]
+            ax.barh(s["gene"], s["mean_logexpr_diff"], color=np.where(s["agrees"], "#2ca02c", "#bbbbbb"))
+            ax.axvline(0, color="black", lw=0.5)
+            ax.set_title(("UP: " if summ.loc[n, "direction"].startswith("up") else "DOWN: ") + short(n, 28),
+                         fontsize=8)
+            ax.tick_params(labelsize=7)
+        for ax in axes.ravel()[len(pick):]:
+            ax.axis("off")
+        fig.suptitle("Real expression of each pathway's top genes: malignant minus normal CD4+ T cells "
+                     "(mean over patients, log scale)\ngreen = moves as the pathway result predicts, "
+                     "grey = does not", y=1.02, fontsize=10)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out, "fig_A5_gene_check.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    return {"gene_check_genes": int(len(g)), "gene_check_agree": int(g["agrees"].sum())}
+
+
 def heatmap(ax, M, rows, cols, title, vmax=None, cmap="RdBu_r", label=""):
     vmax = vmax or np.nanpercentile(np.abs(M), 98)
     im = ax.imshow(M, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
@@ -87,6 +152,9 @@ def main():
     ap.add_argument("--cd4_label", default="CD4+ T cells", help="voted reference type used as the control")
     ap.add_argument("--stage_keys", default="stage1,stage2", help="only printed and saved for now")
     ap.add_argument("--min_cells", type=int, default=20, help="min cells per group per patient")
+    ap.add_argument("--exclude_types", default="Megakaryocyte progenitors",
+                    help="voted cell types left out of the cell-type heatmap (comma separated)")
+    ap.add_argument("--counts", default="", help="CTCL subsample with raw counts, for the gene check")
     ap.add_argument("--top", type=int, default=15, help="pathways shown per direction")
     args = ap.parse_args()
     out = os.path.join(args.map, "partA")
@@ -196,16 +264,24 @@ def main():
                     g.append(dict(pathway=n, direction="up in malignant" if n in set(up["pathway"]) else
                                   "down in malignant", rank=r + 1, gene=genes[i], weight=float(w[i])))
         pd.DataFrame(g).to_csv(os.path.join(out, "comp1_top_genes.csv"), index=False)
+        if args.counts:
+            res.update(gene_check(args.counts, m.obs_names, donor, used, mal, cd4, patient, show, up, W, genes,
+                                  names, out))
+        else:
+            print("gene check skipped (no --counts file given)")
 
     # 3. pathway profile per cell type (patients only): which pathways mark which cell type
     ct = np.where(mal, "malignant", obs["pred_cell_type"].astype(str).values)
-    keep_ct = [c for c, n in pd.Series(ct[patient]).value_counts().items() if n >= 200]
+    # platelet-like cells (voted megakaryocyte progenitors) are left out: they have no nucleus and very little
+    # RNA, so their scores are extreme and would take up the whole colour scale
+    excl = [c.strip() for c in args.exclude_types.split(",") if c.strip()]
+    keep_ct = [c for c, n in pd.Series(ct[patient]).value_counts().items() if n >= 200 and c not in excl]
     M = np.vstack([Z[patient & (ct == c)].mean(0) for c in keep_ct])  # cell types x pathways
     var_idx = np.argsort(-M.var(0))[:30]
     fig, ax = plt.subplots(figsize=(3 + 0.45 * len(keep_ct), 9))
     heatmap(ax, M[:, var_idx].T, [short(n) for n in names[var_idx]], keep_ct,
             "Mean pathway score per cell type (patients only)\n30 pathways that differ most between types",
-            label="mean score (SD)")
+            vmax=1.5, label="mean score (SD, capped at 1.5)")
     fig.savefig(os.path.join(out, "fig_A3_celltype_profiles.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
