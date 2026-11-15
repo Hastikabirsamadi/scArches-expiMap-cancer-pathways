@@ -76,6 +76,16 @@ def unique_names(names):
     return np.array(out)
 
 
+def pathway_scores(model, z, terms):
+    """Sign-corrected pathway scores (higher = more active) of a trained expiMap model's latent z,
+    and the names of the active pathways."""
+    tmp = ad.AnnData(np.zeros((1, 1)))
+    model.latent_directions(adata=tmp)
+    active = model.nonzero_terms()
+    names = unique_names(np.array(model.update_terms(list(terms)))[active])
+    return z * tmp.uns["directions"][active], names
+
+
 def within_patient(Z, donor, patient, mal, cd4, min_cells):
     """One row per patient: mean score of malignant cells minus mean of that patient's normal CD4+ T cells.
     Patients with fewer than min_cells in either group are left out."""

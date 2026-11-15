@@ -35,7 +35,7 @@ import scarches as sca  # noqa: E402
 from scipy.stats import spearmanr  # noqa: E402
 
 from map_ctcl import latent  # noqa: E402
-from partb_training import pathway_scores  # noqa: E402
+from pathways_ctcl import pathway_scores  # noqa: E402
 from run_experiment import prepare  # noqa: E402
 
 
