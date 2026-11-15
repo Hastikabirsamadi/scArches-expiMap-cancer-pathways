@@ -100,26 +100,42 @@ def main():
     vkw = VARIANTS[args.variant]
     corr_kw = dict(alpha_corr=ALPHA_CORR) if vkw["use_corr_penalty"] else {}
 
-    # ---- reference training
-    ref = sca.models.EXPIMAP(adata=adata, condition_key="study", hidden_layer_sizes=[256, 256, 256],
-                             recon_loss="nb", **vkw)
-    ref.train(n_epochs=args.epochs, alpha_epoch_anneal=100, alpha=ALPHA, alpha_kl=0.5, weight_decay=0.0,
-              early_stopping_kwargs=EARLY_STOP, use_early_stopping=True, monitor_only_val=False,
-              seed=args.seed, **corr_kw)
-    t_ref = time.time() - t0
-    pd.DataFrame({k: pd.Series(v) for k, v in ref.trainer.logs.items()}).to_csv(
-        os.path.join(run_dir, "ref_train_log.csv"), index=False)
+    # Colab allows only 2 threads; scanpy's neighbour search (used in the scores) crashed when asking for more
+    import numba
+    sc.settings.n_jobs = numba.config.NUMBA_NUM_THREADS
 
-    # ---- query mapping (architecture surgery)
-    qry = sca.models.EXPIMAP.load_query_data(kang, ref)
-    qry.train(n_epochs=args.epochs, alpha_epoch_anneal=100, weight_decay=0.0, alpha_kl=0.1,
-              seed=args.seed, use_early_stopping=True, **corr_kw)
-    t_all = time.time() - t0
-    pd.DataFrame({k: pd.Series(v) for k, v in qry.trainer.logs.items()}).to_csv(
-        os.path.join(run_dir, "query_train_log.csv"), index=False)
-    if args.save_models:
-        ref.save(os.path.join(run_dir, "ref_model"), overwrite=True)
-        qry.save(os.path.join(run_dir, "query_model"), overwrite=True)
+    ref_dir, q_dir = os.path.join(run_dir, "ref_model"), os.path.join(run_dir, "query_model")
+    if all(os.path.exists(os.path.join(d, "model_params.pt")) for d in (ref_dir, q_dir)):
+        # both models were saved by an earlier run that crashed later: score them instead of training again
+        print("loading the saved reference and query models from", run_dir, flush=True)
+        ref = sca.models.EXPIMAP.load(ref_dir, adata)
+        qry = sca.models.EXPIMAP.load(q_dir, kang)
+        logs = {k: pd.read_csv(os.path.join(run_dir, f"{k}_train_log.csv")) for k in ("ref", "query")}
+        epochs = {k: int(v["epoch_loss"].notna().sum()) for k, v in logs.items()}
+        t_ref = t_all = float("nan")  # training time unknown for reloaded models
+    else:
+        # ---- reference training
+        ref = sca.models.EXPIMAP(adata=adata, condition_key="study", hidden_layer_sizes=[256, 256, 256],
+                                 recon_loss="nb", **vkw)
+        ref.train(n_epochs=args.epochs, alpha_epoch_anneal=100, alpha=ALPHA, alpha_kl=0.5, weight_decay=0.0,
+                  early_stopping_kwargs=EARLY_STOP, use_early_stopping=True, monitor_only_val=False,
+                  seed=args.seed, **corr_kw)
+        t_ref = time.time() - t0
+        pd.DataFrame({k: pd.Series(v) for k, v in ref.trainer.logs.items()}).to_csv(
+            os.path.join(run_dir, "ref_train_log.csv"), index=False)
+
+        # ---- query mapping (architecture surgery)
+        qry = sca.models.EXPIMAP.load_query_data(kang, ref)
+        qry.train(n_epochs=args.epochs, alpha_epoch_anneal=100, weight_decay=0.0, alpha_kl=0.1,
+                  seed=args.seed, use_early_stopping=True, **corr_kw)
+        t_all = time.time() - t0
+        pd.DataFrame({k: pd.Series(v) for k, v in qry.trainer.logs.items()}).to_csv(
+            os.path.join(run_dir, "query_train_log.csv"), index=False)
+        epochs = {"ref": len(ref.trainer.logs.get("epoch_loss", [])),
+                  "query": len(qry.trainer.logs.get("epoch_loss", []))}
+        if args.save_models:
+            ref.save(ref_dir, overwrite=True)
+            qry.save(q_dir, overwrite=True)
 
     # ---- embeddings (posterior mean => deterministic)
     z_ref = ref.get_latent(mean=True, only_active=True)
@@ -132,8 +148,7 @@ def main():
     # ---- metrics
     res = dict(variant=args.variant, seed=args.seed, device=device, n_ref=adata.n_obs, n_query=kang.n_obs,
                n_latent_active_ref=int(z_ref.shape[1]), n_latent_active_joint=int(joint.obsm["X_cvae"].shape[1]),
-               ref_epochs=len(ref.trainer.logs.get("epoch_loss", [])),
-               query_epochs=len(qry.trainer.logs.get("epoch_loss", [])),
+               ref_epochs=epochs["ref"], query_epochs=epochs["query"],
                time_ref_s=round(t_ref, 1), time_total_s=round(t_all, 1))
     res.update({f"ref_{k}": v for k, v in embedding_metrics(
         z_ref, adata.obs["study"].values, adata.obs["cell_type"].values, args.seed).items()})
@@ -146,8 +161,6 @@ def main():
     json.dump(res, open(os.path.join(run_dir, "metrics.json"), "w"), indent=2)
 
     # ---- figures
-    import numba
-    sc.settings.n_jobs = numba.config.NUMBA_NUM_THREADS  # Colab allows only 2 threads
     sc.settings.figdir = run_dir
     for name, ad in (("reference", adata), ("joint", joint)):
         sc.pp.neighbors(ad, use_rep="X_cvae")
