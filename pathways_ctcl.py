@@ -66,6 +66,34 @@ def gene_weights(model_dir, n_pathways):
     return W * sign, genes
 
 
+def unique_names(names):
+    """Reactome names are cut to 30 characters, so two pathways can end up with the same name
+    (REGULATION_OF_INSULIN_SECRETIO). Later copies get _2, _3, in the model's fixed term order."""
+    seen, out = {}, []
+    for n in map(str, names):
+        seen[n] = seen.get(n, 0) + 1
+        out.append(n if seen[n] == 1 else f"{n}_{seen[n]}")
+    return np.array(out)
+
+
+def within_patient(Z, donor, patient, mal, cd4, min_cells):
+    """One row per patient: mean score of malignant cells minus mean of that patient's normal CD4+ T cells.
+    Patients with fewer than min_cells in either group are left out."""
+    rows, used = [], []
+    for p in sorted(set(donor[patient])):
+        a = patient & (donor == p) & mal
+        b = patient & (donor == p) & cd4
+        if a.sum() >= min_cells and b.sum() >= min_cells:
+            rows.append(Z[a].mean(0) - Z[b].mean(0))
+            used.append(p)
+    return (np.vstack(rows) if rows else np.zeros((0, Z.shape[1]))), used
+
+
+def paired_p(D):
+    """Wilcoxon signed-rank p-value per pathway (column): is the per-patient difference centred on zero?"""
+    return np.array([wilcoxon(D[:, j]).pvalue if np.any(D[:, j] != 0) else 1.0 for j in range(D.shape[1])])
+
+
 def gene_check(counts_path, cells, donor, used, mal, cd4, patient, show, up, W, genes, names, out, n_genes=8):
     """Do the measured genes agree with the pathway result? For the top genes of each shown pathway,
     compare their real expression (log-normalised counts) in malignant vs normal CD4+ T cells of the same
@@ -161,7 +189,7 @@ def main():
     os.makedirs(out, exist_ok=True)
 
     m = ad.read_h5ad(os.path.join(args.map, "ctcl_mapped.h5ad"))
-    names = np.array(m.uns["pathways"])
+    names = unique_names(m.uns["pathways"])
     P = np.asarray(m.obsm["X_pathways"], float)
     Z = (P - P.mean(0)) / (P.std(0) + 1e-8)  # standard deviations, so pathways are comparable
     obs = m.obs
@@ -187,20 +215,13 @@ def main():
     print(donors[donors["disease"] != args.normal_value].to_string())
 
     # 1. malignant vs non-malignant CD4+ T cells, inside each patient
-    rows, used = [], []
-    for p in sorted(set(donor[patient])):
-        a = patient & (donor == p) & mal
-        b = patient & (donor == p) & cd4
-        if a.sum() >= args.min_cells and b.sum() >= args.min_cells:
-            rows.append(Z[a].mean(0) - Z[b].mean(0))
-            used.append(p)
+    D, used = within_patient(Z, donor, patient, mal, cd4, args.min_cells)
     res = {"comp1_patients_used": len(used),
            "comp1_patients_skipped": sorted(set(donor[patient]) - set(used))}
     print(f"comparison 1: {len(used)} patients have >= {args.min_cells} malignant and control cells")
     if len(used) < 5:
         raise SystemExit("fewer than 5 patients usable for comparison 1; lower --min_cells or check the labels")
-    D = np.vstack(rows)  # patients x pathways
-    pvals = np.array([wilcoxon(D[:, j]).pvalue if np.any(D[:, j] != 0) else 1.0 for j in range(D.shape[1])])
+    pvals = paired_p(D)
     c1 = pd.DataFrame({"pathway": names, "mean_diff_sd": D.mean(0), "median_diff_sd": np.median(D, 0),
                        "patients_up": (D > 0).sum(0), "patients": len(used), "p": pvals, "fdr": bh(pvals)})
     c1 = c1.sort_values(["fdr", "mean_diff_sd"], key=lambda s: s if s.name == "fdr" else -s.abs())

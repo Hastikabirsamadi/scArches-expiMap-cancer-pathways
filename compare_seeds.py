@@ -32,10 +32,16 @@ def main():
     tabs, checks = {}, {}
     for r in args.runs:
         name = os.path.basename(os.path.normpath(r))
-        tabs[name] = pd.read_csv(os.path.join(r, "partA", "comp1_malignant_vs_cd4.csv")).set_index("pathway")
+        tab = pd.read_csv(os.path.join(r, "partA", "comp1_malignant_vs_cd4.csv"))
+        dup = tab["pathway"][tab["pathway"].duplicated()].unique()
+        if len(dup):  # older runs: two pathways share a cut name and cannot be told apart, so drop both
+            print(f"{name}: dropping pathway names that occur twice: {list(dup)}")
+            tab = tab[~tab["pathway"].isin(dup)]
+        tabs[name] = tab.set_index("pathway")
         f = os.path.join(r, "partA", "comp1_gene_check_summary.csv")
         if os.path.exists(f):
-            checks[name] = pd.read_csv(f).set_index("pathway")
+            g = pd.read_csv(f)
+            checks[name] = g[~g["pathway"].duplicated(keep=False)].set_index("pathway")
     seeds = list(tabs)
     allp = sorted(set().union(*[t.index for t in tabs.values()]))
     common = sorted(set.intersection(*[set(t.index) for t in tabs.values()]))
