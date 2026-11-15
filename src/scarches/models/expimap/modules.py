@@ -24,6 +24,24 @@ class MaskedLinear(nn.Linear):
     def forward(self, input):
         return nn.functional.linear(input, self.weight*self.mask, self.bias)
 
+    @torch.no_grad()
+    def project(self, mode):
+        """Limit the gene weights inside each pathway (column) after every update.
+        'free': no limit (original expiMap). 'positive': negative weights are set to 0, so a pathway's
+        genes can only go up together. 'fixed': every gene of a pathway gets the same weight (the column's
+        mean over its genes), so only one size and sign per pathway is learned."""
+        if mode == "free":
+            return
+        W = self.weight.data
+        if mode == "positive":
+            W.clamp_(min=0)
+        elif mode == "fixed":
+            m = self.mask
+            mean = (W * m).sum(0) / m.sum(0).clamp(min=1)
+            W.copy_(m * mean)
+        else:
+            raise ValueError("decoder_weights must be 'free', 'positive' or 'fixed'")
+
 
 class MaskedCondLayers(nn.Module):
     def __init__(

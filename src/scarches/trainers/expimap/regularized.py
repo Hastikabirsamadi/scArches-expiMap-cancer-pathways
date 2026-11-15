@@ -292,6 +292,10 @@ class expiMapTrainer(trVAETrainer):
             self.prox_ops['ext_unannot_l1'](self.model.decoder.L0.ext_L.weight.data)
         if 'ext_soft_mask' in self.prox_ops:
             self.prox_ops['ext_soft_mask'](self.model.decoder.L0.ext_L_m.weight.data)
+        # limit the pathway gene weights (decoder_weights option; 'free' = original expiMap, no change)
+        mode = getattr(self.model, 'decoder_weights', 'free')
+        if mode != 'free':
+            self.model.decoder.L0.expr_L.project(mode)
 
     def on_iteration(self, batch_data):
         self.init_prox_ops()

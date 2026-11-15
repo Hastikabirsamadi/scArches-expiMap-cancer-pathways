@@ -94,7 +94,8 @@ class EXPIMAP(BaseMixin, SurgeryMixin, CVAELatentsMixin):
         soft_ext_mask: bool = False,
         use_extra_layer: bool = False,
         use_corr_penalty: bool = False,
-        corr_on: str = 'all'
+        corr_on: str = 'all',
+        decoder_weights: str = 'free'
     ):
         self.adata = adata
 
@@ -146,6 +147,7 @@ class EXPIMAP(BaseMixin, SurgeryMixin, CVAELatentsMixin):
         self.use_extra_layer_ = use_extra_layer
         self.use_corr_penalty_ = use_corr_penalty
         self.corr_on_ = corr_on
+        self.decoder_weights_ = decoder_weights
 
         self.model = expiMap(
             self.input_dim_,
@@ -168,7 +170,8 @@ class EXPIMAP(BaseMixin, SurgeryMixin, CVAELatentsMixin):
             self.soft_ext_mask_,
             self.use_extra_layer_,
             self.use_corr_penalty_,
-            self.corr_on_
+            self.corr_on_,
+            self.decoder_weights_
         )
 
         self.is_trained_ = False
@@ -700,7 +703,8 @@ class EXPIMAP(BaseMixin, SurgeryMixin, CVAELatentsMixin):
             'ext_mask': dct['ext_mask_'] if 'ext_mask_' in dct else None,
             'use_extra_layer': dct['use_extra_layer_'] if 'use_extra_layer_' in dct else False,
             'use_corr_penalty': dct['use_corr_penalty_'] if 'use_corr_penalty_' in dct else False,
-            'corr_on': dct['corr_on_'] if 'corr_on_' in dct else 'all'
+            'corr_on': dct['corr_on_'] if 'corr_on_' in dct else 'all',
+            'decoder_weights': dct['decoder_weights_'] if 'decoder_weights_' in dct else 'free'
         }
 
         return init_params

@@ -7,8 +7,8 @@ It continues my earlier course project, [Bioinformatics-course-project-scArches-
 The cancer studied is cutaneous T-cell lymphoma (CTCL), using the blood samples of the CTCL atlas on CELLxGENE (Sézary syndrome, mycosis fungoides and healthy donors). The healthy reference is the PBMC data from the scArches tutorial.
 
 ## Code
-- `src/scarches/` is a copy of scArches v0.6.1 with the changes from the earlier project. Both changes are switched off by default, so the model behaves like the original.
-- `run_experiment.py` and `metrics.py` are the scripts from the earlier project. They prepare the reference data and compute the mixing and label scores.
+- `src/scarches/` is a copy of scArches v0.6.1 with the changes from the earlier project, and a new option `decoder_weights` that limits the gene weights inside each pathway (`free`, `positive` or `fixed`). All changes are switched off by default, so the model behaves like the original.
+- `run_experiment.py` and `metrics.py` are the scripts from the earlier project. They prepare the reference data, train and map, and compute the mixing and label scores. `run_experiment.py` now also has the variants `positive` and `fixed` for Part C.
 - `colab_cancer.ipynb` runs everything on Google Colab and saves all results to Google Drive.
 - `prepare_ctcl.py` takes a subsample of the CTCL blood samples (at most 1000 cells per donor) without loading the whole 3.4 GB file into memory.
 - `map_ctcl.py` maps the CTCL cells onto the healthy reference by surgery and checks how well the mapping worked.
@@ -16,6 +16,7 @@ The cancer studied is cutaneous T-cell lymphoma (CTCL), using the blood samples 
 - `pathways_ctcl.py` is Part A. It finds the pathways that differ between malignant and normal CD4+ T cells of the same patients, and between MF and Sézary patients of the same studies. It also checks whether the top genes of each pathway change in the measured expression.
 - `compare_seeds.py` repeats the comparison over three training seeds and keeps only the pathways that agree in all of them.
 - `partb_ref_seeds.py` is Part B. It checks whether three reference models trained with different seeds give the same pathway scores to the same healthy cells, and whether they use the same genes for each pathway.
+- `compare_fix.py` is Part C. It compares the original decoder with the two limited versions, on how well the seeds agree and on mapping quality.
 
 ## Part A result
 CTCL blood cells (47,325 cells from 48 donors) were mapped onto the healthy PBMC reference by surgery. The mapping is good and stable over three seeds. About 90% of the authors' malignant cells land on reference CD4+ T cells, the median label confidence is 0.93, and these numbers barely change between seeds.

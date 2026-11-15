@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.distributions import Normal, kl_divergence
 import torch.nn.functional as F
 
-from .modules import MaskedLinearDecoder, ExtEncoder
+from .modules import MaskedLinearDecoder, ExtEncoder, MaskedLinear
 from ..trvae.losses import mse, nb
 from .losses import hsic, correlation_penalty
 from ..trvae._utils import one_hot_encoder
@@ -62,7 +62,8 @@ class expiMap(nn.Module, CVAELatentsModelMixin):
                  soft_ext_mask: bool = False,
                  use_extra_layer: bool = False,
                  use_corr_penalty: bool = False,
-                 corr_on: str = 'all'
+                 corr_on: str = 'all',
+                 decoder_weights: str = 'free'
                  ):
         super().__init__()
         assert isinstance(hidden_layer_sizes, list)
@@ -97,6 +98,9 @@ class expiMap(nn.Module, CVAELatentsModelMixin):
         self.use_extra_layer = use_extra_layer
         self.use_corr_penalty = use_corr_penalty
         self.corr_on = corr_on
+        assert decoder_weights in ('free', 'positive', 'fixed'), \
+            "'decoder_weights' must be 'free', 'positive' or 'fixed'"
+        self.decoder_weights = decoder_weights
 
         if decoder_last_layer is None:
             if recon_loss == 'nb':
@@ -169,6 +173,10 @@ class expiMap(nn.Module, CVAELatentsModelMixin):
                                            self.decoder_last_layer,
                                            self.n_ext_decoder,
                                            self.n_ext_m_decoder)
+        if self.decoder_weights != 'free' and isinstance(self.decoder.L0.expr_L, MaskedLinear):
+            if self.decoder_weights == 'positive':  # start from positive weights instead of cutting half away
+                self.decoder.L0.expr_L.weight.data.abs_()
+            self.decoder.L0.expr_L.project(self.decoder_weights)
 
         if self.use_l_encoder:
             self.l_encoder = ExtEncoder([self.input_dim, 128],

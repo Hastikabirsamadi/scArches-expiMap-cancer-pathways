@@ -33,6 +33,9 @@ VARIANTS = {
     # student's penalty as written: raw sum of squared off-diagonal covariances, weight 1e-3
     "corr": dict(use_extra_layer=False, use_corr_penalty=True),
     "both": dict(use_extra_layer=True, use_corr_penalty=True),
+    # fix attempts for the unstable pathway scores: limit the gene weights inside each pathway
+    "positive": dict(use_extra_layer=False, use_corr_penalty=False, decoder_weights="positive"),
+    "fixed": dict(use_extra_layer=False, use_corr_penalty=False, decoder_weights="fixed"),
 }
 ALPHA = 0.7  # group-lasso strength, as in the tutorial
 ALPHA_CORR = 1e-3  # student's value
@@ -143,6 +146,8 @@ def main():
     json.dump(res, open(os.path.join(run_dir, "metrics.json"), "w"), indent=2)
 
     # ---- figures
+    import numba
+    sc.settings.n_jobs = numba.config.NUMBA_NUM_THREADS  # Colab allows only 2 threads
     sc.settings.figdir = run_dir
     for name, ad in (("reference", adata), ("joint", joint)):
         sc.pp.neighbors(ad, use_rep="X_cvae")
