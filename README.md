@@ -15,6 +15,8 @@ The cancer studied is cutaneous T-cell lymphoma (CTCL), using the blood samples 
 - `plot_ctcl.py` draws the mapping figures from the saved results, one question per figure.
 - `pathways_ctcl.py` is Part A. It finds the pathways that differ between malignant and normal CD4+ T cells of the same patients, and between MF and Sézary patients of the same studies. It also checks whether the top genes of each pathway change in the measured expression.
 - `compare_seeds.py` repeats the comparison over three training seeds and keeps only the pathways that agree in all of them.
+- `partb_ref_seeds.py` is Part B0. It checks whether three reference models trained with different seeds give the same pathway scores to the same healthy cells.
+- `partb_training.py` is Part B1. It compares surgery with retraining everything and with no training at all.
 
 ## Part A result
 CTCL blood cells (47,325 cells from 48 donors) were mapped onto the healthy PBMC reference by surgery. The mapping is good and stable over three seeds. About 90% of the authors' malignant cells land on reference CD4+ T cells, the median label confidence is 0.93, and these numbers barely change between seeds.
