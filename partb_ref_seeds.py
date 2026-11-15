@@ -83,9 +83,14 @@ def main():
         A, B = scores[a][common].values, scores[b][common].values
         r_cell = np.array([np.corrcoef(A[:, j], B[:, j])[0, 1] for j in range(len(common))])
         wa, wb = weights[a][common].values, weights[b][common].values
-        cos = (wa * wb).sum(0) / (np.linalg.norm(wa, axis=0) * np.linalg.norm(wb, axis=0) + 1e-12)
+        wa, wb = wa.astype(np.float64), wb.astype(np.float64)
+        na, nb = np.linalg.norm(wa, axis=0), np.linalg.norm(wb, axis=0)
+        # no fixed epsilon here: an earlier version added 1e-12, which turned the cosine of pathways with
+        # tiny (almost switched off) weights into 0. Active pathways never have a norm of exactly 0.
+        cos = (wa * wb).sum(0) / (na * nb)
         for j, n in enumerate(common):
-            rows.append(dict(pair=f"{a}_vs_{b}", pathway=n, cell_r=r_cell[j], weight_cosine=cos[j]))
+            rows.append(dict(pair=f"{a}_vs_{b}", pathway=n, cell_r=r_cell[j], weight_cosine=cos[j],
+                             weight_norm_a=na[j], weight_norm_b=nb[j]))
         res[f"{a}_vs_{b}"] = {"median_cell_r": round(float(np.median(r_cell)), 3),
                               "share_cell_r_above_0.5": round(float((r_cell > 0.5).mean()), 3),
                               # strongly negative r = same pathway, but the sign rule flipped it in one seed
@@ -97,7 +102,27 @@ def main():
             if (ct == x).any() and (ct == y).any():
                 r = spearmanr(contrast(A, ct, x, y), contrast(B, ct, x, y))[0]
                 res[f"{a}_vs_{b}"][f"contrast_spearman[{x} vs {y}]"] = round(float(r), 3)
+    # "almost off": the pathway's weights are below 1% of the seed's median weight size. Group lasso shrinks
+    # unused pathways towards zero, and some stop just short of exactly zero, so they still count as active
+    # although the decoder hardly uses them. Their scores are then mostly noise.
+    norms = pd.DataFrame({s: np.linalg.norm(weights[s][common].values.astype(np.float64), axis=0) for s in seeds},
+                         index=common)
+    small = norms < 0.01 * norms.median()
+    norms.assign(**{f"almost_off_{s}": small[s] for s in seeds}).to_csv(os.path.join(args.out, "weight_norms.csv"))
+    res["almost_off_per_seed"] = {s: int(small[s].sum()) for s in seeds}
+    clear = [n for n in common if not small.loc[n].any()]
+    res["clearly_active_in_all"] = len(clear)
     per = pd.DataFrame(rows)
+    for a, b in pairs:
+        g = per[(per["pair"] == f"{a}_vs_{b}") & per["pathway"].isin(clear)]
+        res[f"{a}_vs_{b}"]["clearly_active_median_cell_r"] = round(float(g["cell_r"].median()), 3)
+        res[f"{a}_vs_{b}"]["clearly_active_median_weight_cosine"] = round(float(g["weight_cosine"].median()), 3)
+        for c in args.contrasts.split(","):
+            x, y = c.split(":")
+            if (ct == x).any() and (ct == y).any():
+                A, B = scores[a][clear].values, scores[b][clear].values
+                r = spearmanr(contrast(A, ct, x, y), contrast(B, ct, x, y))[0]
+                res[f"{a}_vs_{b}"][f"clearly_active_contrast_spearman[{x} vs {y}]"] = round(float(r), 3)
     per.to_csv(os.path.join(args.out, "per_pathway.csv"), index=False)
     json.dump(res, open(os.path.join(args.out, "summary.json"), "w"), indent=2)
     print(json.dumps(res, indent=1))
