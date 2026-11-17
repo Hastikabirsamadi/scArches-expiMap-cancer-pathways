@@ -140,6 +140,9 @@ class BaseMixin:
                 attr_dict = UnpicklerCpu(handle).load()
 
 
+        # a model saved on a GPU could not be loaded on a CPU-only machine unless map_location was given
+        if map_location is None and not torch.cuda.is_available():
+            map_location = "cpu"
         model_state_dict = torch.load(model_path, map_location=map_location)
 
         var_names = np.genfromtxt(varnames_path, delimiter=",", dtype=str)
