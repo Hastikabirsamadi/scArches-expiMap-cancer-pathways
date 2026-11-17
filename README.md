@@ -19,6 +19,7 @@ The cancer studied is cutaneous T-cell lymphoma (CTCL), using the blood samples 
 - `compare_fix.py` is Part C. It compares the original decoder with the two limited versions, on how well the seeds agree and on mapping quality.
 - `partc_overlap.py` is also Part C. It checks whether a pathway's activity moves to other pathways that share genes with it when the model is trained again with another seed.
 - `partc_diagnose.py` is also Part C. It asks what makes the few pathways that agree between seeds different from the rest: how much information they carry, how much the decoder uses them, and how well they follow cell types and the main directions of the data.
+- `partc_alive.py` is also Part C. It separates the living pathways from the dead ones (the encoder gives every cell the same answer) and checks the seed agreement on the living ones. With `--keep`, `compare_seeds.py` then repeats the Part A seed check on the living pathways only.
 
 ## Part A result
 CTCL blood cells (47,325 cells from 48 donors) were mapped onto the healthy PBMC reference by surgery. The mapping is good and stable over three seeds. About 90% of the authors' malignant cells land on reference CD4+ T cells, the median label confidence is 0.93, and these numbers barely change between seeds.

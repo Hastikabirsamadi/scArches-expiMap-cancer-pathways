@@ -7,6 +7,9 @@ Do the Part A results hold up when the model is trained again with another rando
 Each run folder must contain partA/ from pathways_ctcl.py. A pathway counts as robust when it is
 significant (FDR < 0.05) with the same direction in every seed. Pathways that a seed's model switched off
 (group lasso) are missing in that seed and so cannot be robust.
+
+--keep FILE (a csv with columns pathway and alive_all_seeds, from partc_alive.py) repeats the check on the
+living pathways only. The FDR is then computed again over the kept pathways, since fewer tests are made.
 """
 import argparse
 import json
@@ -20,14 +23,22 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from scipy.stats import spearmanr  # noqa: E402
 
+from pathways_ctcl import bh  # noqa: E402
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--fdr", type=float, default=0.05)
+    ap.add_argument("--keep", help="alive_<version>.csv from partc_alive.py: keep living pathways only")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+    keep = None
+    if args.keep:
+        k = pd.read_csv(args.keep)
+        keep = set(k.loc[k["alive_all_seeds"], "pathway"])
+        print(f"keeping {len(keep)} living pathways from {args.keep}")
 
     tabs, checks = {}, {}
     for r in args.runs:
@@ -37,11 +48,15 @@ def main():
         if len(dup):  # older runs: two pathways share a cut name and cannot be told apart, so drop both
             print(f"{name}: dropping pathway names that occur twice: {list(dup)}")
             tab = tab[~tab["pathway"].isin(dup)]
+        if keep is not None:
+            tab = tab[tab["pathway"].isin(keep)].copy()
+            tab["fdr"] = bh(tab["p"].values)  # fewer tests, so the correction is computed again
         tabs[name] = tab.set_index("pathway")
         f = os.path.join(r, "partA", "comp1_gene_check_summary.csv")
         if os.path.exists(f):
             g = pd.read_csv(f)
-            checks[name] = g[~g["pathway"].duplicated(keep=False)].set_index("pathway")
+            g = g[~g["pathway"].duplicated(keep=False)]
+            checks[name] = (g[g["pathway"].isin(keep)] if keep is not None else g).set_index("pathway")
     seeds = list(tabs)
     allp = sorted(set().union(*[t.index for t in tabs.values()]))
     common = sorted(set.intersection(*[set(t.index) for t in tabs.values()]))
