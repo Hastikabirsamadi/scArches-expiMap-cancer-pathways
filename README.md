@@ -17,6 +17,7 @@ The cancer studied is cutaneous T-cell lymphoma (CTCL), using the blood samples 
 - `compare_seeds.py` repeats the comparison over three training seeds and keeps only the pathways that agree in all of them.
 - `partb_ref_seeds.py` is Part B. It checks whether three reference models trained with different seeds give the same pathway scores to the same healthy cells, and whether they use the same genes for each pathway.
 - `compare_fix.py` is Part C. It compares the original decoder with the two limited versions, on how well the seeds agree and on mapping quality.
+- `partc_overlap.py` is also Part C. It checks whether a pathway's activity moves to other pathways that share genes with it when the model is trained again with another seed.
 
 ## Part A result
 CTCL blood cells (47,325 cells from 48 donors) were mapped onto the healthy PBMC reference by surgery. The mapping is good and stable over three seeds. About 90% of the authors' malignant cells land on reference CD4+ T cells, the median label confidence is 0.93, and these numbers barely change between seeds.
