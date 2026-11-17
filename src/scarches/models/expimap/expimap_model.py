@@ -8,6 +8,7 @@ import pandas as pd
 from anndata import AnnData, read_h5ad as read
 from copy import deepcopy
 from typing import Optional, Union
+from scipy.sparse import issparse
 
 from .expimap import expiMap
 from ...trainers import expiMapTrainer
@@ -260,6 +261,55 @@ class EXPIMAP(BaseMixin, SurgeryMixin, CVAELatentsMixin):
            Active terms are the terms which were not deactivated by the group lasso regularization.
         """
         return self.model.decoder.nonzero_terms()
+
+    def alive_terms(
+        self,
+        x: Optional[np.ndarray] = None,
+        c: Optional[np.ndarray] = None,
+        min_kl: float = 0.01,
+        return_kl: bool = False,
+        chunk: int = 10000
+    ):
+        """Return a boolean mask of the terms that are active AND carry information about the cells.
+
+           `nonzero_terms` only checks the decoder weights. A term can keep non-zero weights while its
+           latent node has collapsed to the prior: the encoder gives every cell the same answer (mean 0,
+           variance 1), so its score is noise. Such a term is 'dead'. Here a term is 'alive' when it is
+           active and its KL divergence from the prior, averaged over the cells, is at least `min_kl`.
+           Dead and alive nodes are usually orders of magnitude apart (e.g. 1e-6 vs 0.1 to 3), so the
+           exact threshold hardly matters.
+
+           Parameters
+           ----------
+           x
+                Data to encode, shape [n_obs, input_dim]. If None, `self.adata.X` is used.
+           c
+                Condition labels of `x`. If None, they are taken from `self.adata`.
+           min_kl
+                Minimum mean KL divergence for a term to count as alive.
+           return_kl
+                If True, also return the mean KL divergence of every latent node.
+           chunk
+                Number of cells encoded at once.
+
+           Returns
+           -------
+           Boolean array over all latent nodes (same layout as `nonzero_terms`), and optionally the KL values.
+        """
+        if x is None and c is None:
+            x = self.adata.X
+            if self.conditions_ is not None:
+                c = self.adata.obs[self.condition_key_]
+        c = None if c is None else np.asarray(c)
+        kl_sum = 0.
+        for i in range(0, x.shape[0], chunk):
+            x_i = x[i:i + chunk]
+            x_i = x_i.toarray() if issparse(x_i) else np.asarray(x_i)
+            mu, var = self.get_latent(x_i, None if c is None else c[i:i + chunk], mean_var=True)
+            kl_sum = kl_sum + (0.5 * (mu ** 2 + var - np.log(var) - 1)).sum(0)
+        kl = kl_sum / x.shape[0]
+        alive = self.nonzero_terms() & (kl >= min_kl)
+        return (alive, kl) if return_kl else alive
 
     def get_latent(
         self,
